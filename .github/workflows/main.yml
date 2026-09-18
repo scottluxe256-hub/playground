@@ -1,87 +1,65 @@
-name: Build libavif Native Binaries (.so)
+name: Build libavif Native Binary (arm64-v8a)
 
 on:
-  # Memungkinkan kamu menjalankan workflow ini secara manual lewat tombol di tab "Actions"
-  workflow_dispatch: 
+  workflow_dispatch:
 
 jobs:
-  build-so:
-    name: Build untuk ${{ matrix.abi }}
+  build-arm64:
+    name: Build libavif (arm64-v8a)
     runs-on: ubuntu-latest
-    
-    # Menjalankan 3 proses kompilasi secara paralel agar cepat selesai
-    strategy:
-      matrix:
-        abi: [arm64-v8a, armeabi-v7a, x86_64]
 
     steps:
-      # 1. Install tool wajib untuk kompilasi AV1 (dav1d butuh meson & ninja, aom butuh perl/nasm)
-      - name: Install Build Tools (Meson, Ninja, NASM)
+      # 1. Install tool wajib untuk kompilasi
+      - name: Install Build Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y meson ninja-build nasm
+          sudo apt-get install -y meson ninja-build nasm cmake
 
-      # 2. Setup Android NDK & CMake tanpa memicu error lisensi
-      - name: Setup Android NDK & CMake
+      # 2. Setup Android NDK
+      - name: Setup Android NDK
         run: |
           echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
           $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.2.9519653" "cmake;3.22.1"
 
-            # 3. Kloning Source Code libavif (Otomatis Ambil Tag Release Terbaru)
-      - name: Clone Latest Stable libavif Tag
-        run: |
-          # Mengambil nama tag release terbaru via API GitHub
-          LATEST_TAG=$(curl -s https://api.github.com/repos/AOMediaCodec/libavif/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-          echo "Mengunduh libavif versi stabil terbaru: $LATEST_TAG"
-          
-      # 3. Kloning Source Code libavif (Otomatis Ambil Tag Release Terbaru)
-      - name: Clone Latest Stable libavif Tag
-        run: |
-          # Mengambil nama tag release terbaru via API GitHub
-          LATEST_TAG=$(curl -s https://api.github.com/repos/AOMediaCodec/libavif/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-          echo "Mengunduh libavif versi stabil terbaru: $LATEST_TAG"
-          
-          # Clone spesifik pada tag tersebut
-          git clone --branch $LATEST_TAG --depth 1 https://github.com/AOMediaCodec/libavif.git
-          
-      # 4. Mengunduh Codec Dependencies (dav1d untuk decoder, aom untuk encoder)
-      - name: Fetch dav1d & libaom Source
+      # 3. Kloning Source Code libavif Terbaru (Commit Paling Akhir)
+      - name: Clone libavif Repository
+        run: git clone --depth 1 https://github.com/AOMediaCodec/libavif.git
+
+      # 4. Unduh Dependencies (dav1d & libaom)
+      - name: Fetch Dependencies
         run: |
           cd libavif/ext
           bash dav1d.cmd
           bash aom.cmd
 
-      # 5. Proses Kompilasi C++ Menggunakan Android Toolchain NDK
+      # 5. Kompilasi khusus arm64-v8a
       - name: Compile libavif to .so
-        env:
-          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/25.2.9519653
         run: |
+          NDK_PATH="$ANDROID_HOME/ndk/25.2.9519653"
           cd libavif
-          mkdir build_${{ matrix.abi }}
-          cd build_${{ matrix.abi }}
+          mkdir build_arm64
+          cd build_arm64
           
-          # Konfigurasi CMake khusus cross-compilation Android
           cmake .. \
-            -DCMAKE_TOOLCHAIN_FILE=$NDK_HOME/build/cmake/android.toolchain.cmake \
-            -DANDROID_ABI=${{ matrix.abi }} \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK_PATH/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-21 \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=ON \
             -DAVIF_CODEC_DAV1D=LOCAL \
             -DAVIF_CODEC_AOM=LOCAL
           
-          # Eksekusi build menggunakan 4 core CPU GitHub Runner
           cmake --build . --parallel 4
 
-      # 6. Menyiapkan folder struktur Android (jniLibs)
+      # 6. Menyiapkan folder struktur jniLibs/arm64-v8a
       - name: Prepare jniLibs Folder
         run: |
-          mkdir -p jniLibs/${{ matrix.abi }}
-          cp libavif/build_${{ matrix.abi }}/libavif.so jniLibs/${{ matrix.abi }}/
+          mkdir -p jniLibs/arm64-v8a
+          cp libavif/build_arm64/libavif.so jniLibs/arm64-v8a/
 
-      # 7. Mengunggah file .so agar bisa kamu download dari dashboard GitHub!
-      - name: Upload .so File as Artifact
+      # 7. Upload File .so sebagai Artifact
+      - name: Upload arm64 .so File
         uses: actions/upload-artifact@v4
         with:
-          name: libavif-${{ matrix.abi }}
-          path: jniLibs/${{ matrix.abi }}/
+          name: libavif-arm64-v8a
+          path: jniLibs/arm64-v8a/
