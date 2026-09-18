@@ -1,0 +1,93 @@
+name: Build dav1d Android ARM64
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-dav1d:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            meson \
+            ninja-build \
+            nasm \
+            pkg-config
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: |
+          sdkmanager "ndk;27.2.12479018"
+
+      - name: Clone dav1d
+        run: |
+          git clone --depth 1 --branch 1.5.4 \
+            https://github.com/videolan/dav1d.git
+
+      - name: Build dav1d
+        shell: bash
+        run: |
+          set -e
+
+          NDK="$ANDROID_SDK_ROOT/ndk/27.2.12479018"
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          export PATH="$TOOLCHAIN:$PATH"
+
+          cd dav1d
+
+          meson setup build \
+            --cross-file "package/crossfiles/aarch64-android.meson" \
+            --buildtype release \
+            --default-library shared \
+            --libdir lib \
+            --prefix "$PWD/build/install" \
+            -Dbitdepths=8,16 \
+            -Denable_asm=true \
+            -Denable_tools=false \
+            -Denable_examples=false \
+            -Denable_tests=false \
+            -Denable_seek_stress=false \
+            -Denable_docs=false \
+            -Dtestdata_tests=false \
+            -Dlogging=false \
+            -Dtrim_dsp=if-release
+
+          ninja -C build
+          ninja -C build install
+
+      - name: Strip library
+        run: |
+          TOOLCHAIN="$ANDROID_SDK_ROOT/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          "$TOOLCHAIN/llvm-strip" \
+            --strip-unneeded \
+            "dav1d/build/install/lib/libdav1d.so"
+
+      - name: Show result
+        run: |
+          file "dav1d/build/install/lib/libdav1d.so"
+          ls -lh "dav1d/build/install/lib/libdav1d.so"
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p output/arm64-v8a
+
+          cp \
+            "dav1d/build/install/lib/libdav1d.so" \
+            "output/arm64-v8a/libdav1d.so"
+
+          cp -r \
+            dav1d/include \
+            "output/arm64-v8a/"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libdav1d-arm64-v8a
+          path: output/arm64-v8a
