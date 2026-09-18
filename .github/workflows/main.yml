@@ -1,91 +1,289 @@
-name: Build libavif Native Binary (arm64-v8a) - Lite
+name: Build libavif Native Binary (arm64-v8a) - AVIF Decoder Only
 
 on:
   workflow_dispatch:
 
 jobs:
   build-arm64:
-    name: Build libavif Lite (arm64-v8a)
+    name: Build libavif Decoder Only
     runs-on: ubuntu-latest
 
+    env:
+      NDK_VERSION: 25.2.9519653
+      ANDROID_ABI: arm64-v8a
+      ANDROID_PLATFORM: android-21
+
     steps:
+
+      # ============================================================
+      # BUILD TOOLS
+      # ============================================================
       - name: Install Build Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build cmake
+          sudo apt-get install -y \
+            ninja-build \
+            cmake \
+            git
 
+      # ============================================================
+      # ANDROID NDK
+      # ============================================================
       - name: Setup Android NDK
         run: |
-          echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.2.9519653" "cmake;3.22.1"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
 
-      - name: Clone libavif Repository
-        run: git clone --depth 1 https://github.com/AOMediaCodec/libavif.git
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "ndk;${NDK_VERSION}" \
+            "cmake;3.22.1"
 
-      - name: Cross-Compile Dependencies for Android (Decoder Only)
+      # ============================================================
+      # CLONE LIBAVIF
+      # ============================================================
+      - name: Clone libavif
         run: |
-          NDK_PATH="$ANDROID_HOME/ndk/25.2.9519653"
+          git clone \
+            --depth 1 \
+            --branch v1.2.1 \
+            https://github.com/AOMediaCodec/libavif.git
+
+      # ============================================================
+      # LIBYUV
+      # ============================================================
+      - name: Build libyuv
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          NDK_PATH="$ANDROID_HOME/ndk/${NDK_VERSION}"
           TOOLCHAIN="$NDK_PATH/build/cmake/android.toolchain.cmake"
-          
+
           cd libavif/ext
-          
-          # 1. Build libyuv
-          git clone --depth 1 https://chromium.googlesource.com/libyuv/libyuv.git
+
+          git clone \
+            --depth 1 \
+            https://chromium.googlesource.com/libyuv/libyuv.git
+
           cd libyuv
-          mkdir build.libavif && cd build.libavif
-          cmake -G Ninja .. -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-21 -DCMAKE_BUILD_TYPE=MinSizeRel
-          ninja
-          cd ../..
-          
-          # 2. Build libaom (Matikan Encoder untuk hemat ukuran)
-          git clone -b v3.9.1 --depth 1 https://aomedia.googlesource.com/aom
-          cd aom
-          mkdir build.libavif && cd build.libavif
-          cmake -G Ninja .. \
+
+          cmake -G Ninja \
+            -S . \
+            -B build.libavif \
             -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
-            -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-21 \
+            -DANDROID_ABI="${ANDROID_ABI}" \
+            -DANDROID_PLATFORM="${ANDROID_PLATFORM}" \
             -DCMAKE_BUILD_TYPE=MinSizeRel \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DUNIT_TESTING=OFF
+
+          cmake --build build.libavif --parallel
+
+      # ============================================================
+      # LIBAOM
+      #
+      # Encoder OFF
+      # Decoder ON
+      # ============================================================
+      - name: Build libaom Decoder Only
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          NDK_PATH="$ANDROID_HOME/ndk/${NDK_VERSION}"
+          TOOLCHAIN="$NDK_PATH/build/cmake/android.toolchain.cmake"
+
+          cd libavif/ext
+
+          git clone \
+            --depth 1 \
+            --branch v3.9.1 \
+            https://aomedia.googlesource.com/aom
+
+          cd aom
+
+          cmake -G Ninja \
+            -S . \
+            -B build.libavif \
+            -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
+            -DANDROID_ABI="${ANDROID_ABI}" \
+            -DANDROID_PLATFORM="${ANDROID_PLATFORM}" \
+            -DCMAKE_BUILD_TYPE=MinSizeRel \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DCONFIG_PIC=1 \
             -DCONFIG_AV1_ENCODER=0 \
-            -DENABLE_DOCS=0 -DENABLE_EXAMPLES=0 -DENABLE_TESTDATA=0 -DENABLE_TESTS=0 -DENABLE_TOOLS=0
-          ninja
-          cd ../..
+            -DCONFIG_AV1_DECODER=1 \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DENABLE_DOCS=0 \
+            -DENABLE_EXAMPLES=0 \
+            -DENABLE_TESTDATA=0 \
+            -DENABLE_TESTS=0 \
+            -DENABLE_TOOLS=0
 
-      - name: Compile & Strip libavif.so
+          cmake --build build.libavif --parallel
+
+      # ============================================================
+      # PATCH LIBAVIF
+      #
+      # Jangan biarkan codec_aom.c mengompilasi encoder.
+      # ============================================================
+      - name: Disable libavif AOM Encoder
+        shell: bash
         run: |
-          NDK_PATH="$ANDROID_HOME/ndk/25.2.9519653"
-          STRIP_TOOL="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
-          
+          set -euxo pipefail
+
           cd libavif
-          mkdir build_arm64
-          cd build_arm64
-          
-          # Gunakan MinSizeRel (Optimize for Size)
-          cmake -G Ninja .. \
-            -DCMAKE_TOOLCHAIN_FILE="$NDK_PATH/build/cmake/android.toolchain.cmake" \
-            -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-21 \
-            -DCMAKE_BUILD_TYPE=MinSizeRel \
-            -DBUILD_SHARED_LIBS=ON \
-            -DAVIF_CODEC_AOM=LOCAL \
-            -DAVIF_LIBYUV=LOCAL
-          
-          ninja
-          
-          # Hapus seluruh debug symbol menggunakan llvm-strip bawaan NDK
-          echo "Ukuran sebelum strip:"
-          ls -lh libavif.so
-          $STRIP_TOOL --strip-unneeded libavif.so
-          echo "Ukuran setelah strip:"
-          ls -lh libavif.so
 
-      - name: Prepare jniLibs Folder
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("src/codec_aom.c")
+          s = p.read_text()
+
+          # Pastikan encoder function yang membutuhkan
+          # aom_codec_av1_cx tidak ikut dikompilasi.
+          start = s.find("static avifResult aomCodecEncodeImage(")
+
+          if start != -1:
+              end = s.find("\nstatic ", start + 10)
+
+              if end == -1:
+                  end = len(s)
+
+              s = s[:start] + s[end:]
+
+          p.write_text(s)
+          PY
+
+          # Pastikan reference encoder benar-benar sudah hilang.
+          if grep -n "aom_codec_av1_cx" src/codec_aom.c; then
+            echo "ERROR: aom_codec_av1_cx masih direferensikan!"
+            exit 1
+          fi
+
+          echo "AOM encoder reference berhasil dihapus."
+
+      # ============================================================
+      # BUILD LIBAVIF
+      # ============================================================
+      - name: Build libavif.so
+        shell: bash
         run: |
-          mkdir -p jniLibs/arm64-v8a
-          cp libavif/build_arm64/libavif.so jniLibs/arm64-v8a/
+          set -euxo pipefail
 
-      - name: Upload arm64 .so File
+          NDK_PATH="$ANDROID_HOME/ndk/${NDK_VERSION}"
+          TOOLCHAIN="$NDK_PATH/build/cmake/android.toolchain.cmake"
+          STRIP_TOOL="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+
+          cd libavif
+
+          rm -rf build_arm64
+
+          cmake -G Ninja \
+            -S . \
+            -B build_arm64 \
+            -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
+            -DANDROID_ABI="${ANDROID_ABI}" \
+            -DANDROID_PLATFORM="${ANDROID_PLATFORM}" \
+            -DCMAKE_BUILD_TYPE=MinSizeRel \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DBUILD_SHARED_LIBS=ON \
+            \
+            -DAVIF_CODEC_AOM=LOCAL \
+            -DAVIF_CODEC_AOM_DECODE=ON \
+            -DAVIF_CODEC_AOM_ENCODE=OFF \
+            \
+            -DAVIF_LIBYUV=LOCAL \
+            \
+            -DAVIF_JPEG=OFF \
+            -DAVIF_ZLIBPNG=OFF \
+            -DAVIF_LIBSHARPYUV=OFF \
+            \
+            -DAVIF_BUILD_APPS=OFF \
+            -DAVIF_BUILD_TESTS=OFF \
+            -DAVIF_BUILD_MAN_PAGES=OFF \
+            -DAVIF_ENABLE_WERROR=OFF
+
+          cmake --build build_arm64 --parallel
+
+          test -f build_arm64/libavif.so
+
+          echo "======================================"
+          echo "SIZE BEFORE STRIP"
+          echo "======================================"
+
+          ls -lh build_arm64/libavif.so
+
+          "$STRIP_TOOL" \
+            --strip-all \
+            build_arm64/libavif.so
+
+          echo "======================================"
+          echo "SIZE AFTER STRIP"
+          echo "======================================"
+
+          ls -lh build_arm64/libavif.so
+
+      # ============================================================
+      # VERIFY
+      # ============================================================
+      - name: Verify Library
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          NDK_PATH="$ANDROID_HOME/ndk/${NDK_VERSION}"
+          READ_ELF="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+
+          echo "======================================"
+          echo "ELF"
+          echo "======================================"
+
+          "$READ_ELF" \
+            -h \
+            libavif/build_arm64/libavif.so \
+            | grep -E "Class:|Machine:"
+
+          echo "======================================"
+          echo "CHECK ENCODER SYMBOL"
+          echo "======================================"
+
+          if "$READ_ELF" \
+            -Ws \
+            libavif/build_arm64/libavif.so \
+            | grep -q "aom_codec_av1_cx"; then
+
+            echo "ERROR: Encoder symbol masih ada!"
+            exit 1
+          fi
+
+          echo "OK: aom_codec_av1_cx tidak ditemukan."
+
+      # ============================================================
+      # PREPARE FLUTTER JNI
+      # ============================================================
+      - name: Prepare jniLibs
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -rf jniLibs
+
+          mkdir -p jniLibs/arm64-v8a
+
+          cp \
+            libavif/build_arm64/libavif.so \
+            jniLibs/arm64-v8a/libavif.so
+
+          ls -lh \
+            jniLibs/arm64-v8a/libavif.so
+
+      # ============================================================
+      # UPLOAD
+      # ============================================================
+      - name: Upload libavif
         uses: actions/upload-artifact@v4
         with:
-          name: libavif-arm64-v8a
-          path: jniLibs/arm64-v8a/
+          name: libavif-arm64-v8a-decoder-only
+          path: jniLibs/arm64-v8a/libavif.so
+          if-no-files-found: error
