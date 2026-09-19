@@ -11,12 +11,13 @@ jobs:
     env:
       DAV1D_VERSION: "1.5.4"
       NDK_VERSION: "30.0.16248370"
+      NDK_DIR: "android-ndk-r30"
       ABI: "arm64-v8a"
-      ANDROID_API: "29"
 
     steps:
+
       # ---------------------------------------------------------
-      # 1. Install build tools
+      # 1. Install build dependencies
       # ---------------------------------------------------------
       - name: Install build dependencies
         run: |
@@ -27,11 +28,16 @@ jobs:
           sudo apt-get install -y \
             meson \
             ninja-build \
-            pkg-config
+            nasm \
+            pkg-config \
+            wget \
+            unzip
 
           meson --version
           ninja --version
+          nasm -v
           pkg-config --version
+
 
       # ---------------------------------------------------------
       # 2. Setup Android SDK command-line tools
@@ -41,43 +47,98 @@ jobs:
         with:
           packages: ''
 
+
       # ---------------------------------------------------------
-      # 3. Install Android NDK
+      # 3. Download Android NDK r30 directly
       # ---------------------------------------------------------
-      - name: Install Android NDK
+      - name: Download Android NDK
         shell: bash
         run: |
           set -euxo pipefail
 
-          sdkmanager --install "ndk;${NDK_VERSION}"
+          NDK_URL="https://dl.google.com/android/repository/android-ndk-r30-linux.zip"
+          NDK_SHA1="5107f898313790e449e87eee2183d9a20602dee9"
 
-          test -d "$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}"
+          echo "Downloading Android NDK ${NDK_VERSION}..."
 
-          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          wget \
+            --progress=dot:giga \
+            -O android-ndk-r30-linux.zip \
+            "$NDK_URL"
+
+          echo "Checking SHA1..."
+
+          echo "${NDK_SHA1}  android-ndk-r30-linux.zip" | sha1sum -c -
+
+          echo "Extracting NDK..."
+
+          unzip \
+            -q \
+            android-ndk-r30-linux.zip
+
+          test -d "${NDK_DIR}"
+
+          echo "NDK extracted successfully."
+
+          ls -ld "${NDK_DIR}"
+
 
       # ---------------------------------------------------------
-      # 4. Verify Android NDK toolchain
+      # 4. Setup NDK environment
       # ---------------------------------------------------------
-      - name: Verify Android toolchain
+      - name: Configure Android NDK
         shell: bash
         run: |
           set -euxo pipefail
 
-          TOOLCHAIN="$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          NDK_PATH="$GITHUB_WORKSPACE/${NDK_DIR}"
+
+          test -d "$NDK_PATH"
+
+          echo "ANDROID_NDK_ROOT=$NDK_PATH" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$NDK_PATH" >> "$GITHUB_ENV"
+
+          echo "NDK path:"
+          echo "$NDK_PATH"
+
+
+      # ---------------------------------------------------------
+      # 5. Verify NDK toolchain
+      # ---------------------------------------------------------
+      - name: Verify NDK
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          TOOLCHAIN="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
           test -x "$TOOLCHAIN/aarch64-linux-android21-clang"
+          test -x "$TOOLCHAIN/aarch64-linux-android21-clang++"
           test -x "$TOOLCHAIN/llvm-ar"
           test -x "$TOOLCHAIN/llvm-strip"
           test -x "$TOOLCHAIN/llvm-readelf"
 
-          echo "Toolchain:"
-          "$TOOLCHAIN/aarch64-linux-android21-clang" --version
-          "$TOOLCHAIN/llvm-strip" --version
+          echo "===== CLANG ====="
+
+          "$TOOLCHAIN/aarch64-linux-android21-clang" \
+            --version
+
+          echo
+          echo "===== NDK VERSION ====="
+
+          cat "$ANDROID_NDK_ROOT/source.properties"
+
+          echo
+          echo "===== TOOLCHAIN ====="
+
+          ls -lh \
+            "$TOOLCHAIN/aarch64-linux-android21-clang"
+
 
       # ---------------------------------------------------------
-      # 5. Download official dav1d release
+      # 6. Clone official dav1d
       # ---------------------------------------------------------
-      - name: Download dav1d
+      - name: Clone dav1d
         shell: bash
         run: |
           set -euxo pipefail
@@ -89,10 +150,12 @@ jobs:
 
           cd dav1d
 
+          echo "dav1d version:"
           git describe --tags --always
 
+
       # ---------------------------------------------------------
-      # 6. Configure dav1d
+      # 7. Configure dav1d
       # ---------------------------------------------------------
       - name: Configure dav1d
         shell: bash
@@ -106,9 +169,9 @@ jobs:
           meson setup build \
             --cross-file "package/crossfiles/aarch64-android.meson" \
             --buildtype release \
+            --default-library shared \
             --libdir lib \
             --prefix "$PWD/build/install" \
-            -Ddefault_library=shared \
             -Dbitdepths=8,16 \
             -Denable_asm=true \
             -Denable_tools=false \
@@ -120,8 +183,14 @@ jobs:
             -Dlogging=false \
             -Dtrim_dsp=if-release
 
+          echo
+          echo "===== MESON CONFIGURATION ====="
+
+          meson configure build
+
+
       # ---------------------------------------------------------
-      # 7. Build
+      # 8. Build
       # ---------------------------------------------------------
       - name: Build dav1d
         shell: bash
@@ -130,8 +199,9 @@ jobs:
 
           ninja -C dav1d/build
 
+
       # ---------------------------------------------------------
-      # 8. Install
+      # 9. Install
       # ---------------------------------------------------------
       - name: Install dav1d
         shell: bash
@@ -143,114 +213,119 @@ jobs:
           test -d "dav1d/build/install/lib"
           test -d "dav1d/build/install/include"
 
+
       # ---------------------------------------------------------
-      # 9. Find real shared library
+      # 10. Locate libdav1d
       # ---------------------------------------------------------
-      - name: Locate shared library
+      - name: Locate libdav1d
         shell: bash
         run: |
           set -euxo pipefail
 
           PREFIX="dav1d/build/install"
 
-          echo "Installed files:"
+          echo "Installed libraries:"
           find "$PREFIX/lib" -maxdepth 1 -type f -o -type l | sort
 
-          LIB_FILE="$(find "$PREFIX/lib" \
-            -maxdepth 1 \
-            -type f \
-            -name 'libdav1d.so.*' \
-            -print -quit)"
+          LIB_FILE="$(
+            find "$PREFIX/lib" \
+              -maxdepth 1 \
+              -type f \
+              -name 'libdav1d.so.*' \
+              -print -quit
+          )"
 
           test -n "$LIB_FILE"
           test -f "$LIB_FILE"
 
           echo "DAV1D_LIBRARY=$LIB_FILE" >> "$GITHUB_ENV"
 
-          echo "Found:"
+          echo
+          echo "Found library:"
           ls -lh "$LIB_FILE"
 
+
       # ---------------------------------------------------------
-      # 10. Strip
+      # 11. Strip library
       # ---------------------------------------------------------
       - name: Strip libdav1d
         shell: bash
         run: |
           set -euxo pipefail
 
-          TOOLCHAIN="$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          TOOLCHAIN="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
           "$TOOLCHAIN/llvm-strip" \
             --strip-unneeded \
             "$DAV1D_LIBRARY"
 
+          echo "After strip:"
           ls -lh "$DAV1D_LIBRARY"
 
+
       # ---------------------------------------------------------
-      # 11. Verify ELF architecture
+      # 12. Rename to libdav1d.so
       # ---------------------------------------------------------
-      - name: Verify library
+      - name: Prepare shared library
         shell: bash
         run: |
           set -euxo pipefail
 
-          TOOLCHAIN="$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-
-          echo "===== ELF HEADER ====="
-
-          "$TOOLCHAIN/llvm-readelf" -h "$DAV1D_LIBRARY"
-
-          echo
-          echo "===== DYNAMIC SECTION ====="
-
-          "$TOOLCHAIN/llvm-readelf" -d "$DAV1D_LIBRARY" || true
-
-          echo
-          echo "===== FILE INFO ====="
-
-          file "$DAV1D_LIBRARY"
-
-          echo
-          echo "===== SIZE ====="
-
-          ls -lh "$DAV1D_LIBRARY"
-
-      # ---------------------------------------------------------
-      # 12. Prepare artifact
-      # ---------------------------------------------------------
-      - name: Prepare artifact
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          rm -rf output
-
-          mkdir -p \
-            "output/${ABI}/lib" \
-            "output/${ABI}/include"
+          mkdir -p output/arm64-v8a
 
           cp \
             "$DAV1D_LIBRARY" \
-            "output/${ABI}/lib/libdav1d.so"
+            output/arm64-v8a/libdav1d.so
 
-          cp -r \
-            dav1d/build/install/include/dav1d \
-            "output/${ABI}/include/"
+          test -f output/arm64-v8a/libdav1d.so
 
-          echo
-          echo "===== ARTIFACT ====="
+          echo "Final library:"
+          ls -lh output/arm64-v8a/libdav1d.so
 
-          find output -type f -print
-
-          echo
-          ls -lh "output/${ABI}/lib/libdav1d.so"
 
       # ---------------------------------------------------------
-      # 13. Upload
+      # 13. Verify ELF
+      # ---------------------------------------------------------
+      - name: Verify ELF
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          TOOLCHAIN="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          echo "===== FILE ====="
+
+          file \
+            output/arm64-v8a/libdav1d.so
+
+          echo
+          echo "===== ELF HEADER ====="
+
+          "$TOOLCHAIN/llvm-readelf" \
+            -h \
+            output/arm64-v8a/libdav1d.so
+
+          echo
+          echo "===== NEEDED LIBRARIES ====="
+
+          "$TOOLCHAIN/llvm-readelf" \
+            -d \
+            output/arm64-v8a/libdav1d.so \
+            | grep NEEDED || true
+
+          echo
+          echo "===== FINAL SIZE ====="
+
+          ls -lh \
+            output/arm64-v8a/libdav1d.so
+
+
+      # ---------------------------------------------------------
+      # 14. Upload artifact
       # ---------------------------------------------------------
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: libdav1d-android-arm64
-          path: output/
+          path: output/arm64-v8a/libdav1d.so
           if-no-files-found: error
